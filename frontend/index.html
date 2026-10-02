@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Event Tickets DApp</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<style>
+body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;max-width:760px;margin:0 auto;padding:16px}
+.card{background:#1e293b;border-radius:12px;padding:16px;margin:12px 0}
+h1{margin:0}h3{margin:0 0 8px}
+button{background:#6366f1;color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;margin:2px}
+button:disabled{opacity:.5}input{padding:8px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;margin:2px;width:min(100%,320px)}
+a{color:#93c5fd}small,.muted{color:#94a3b8}#tx{border-left:4px solid #6366f1}.ok{color:#4ade80}.err{color:#f87171}
+code{word-break:break-all}
+</style></head><body>
+<h1>🎟️ Event Tickets DApp</h1><p class="muted">Sepolia testnet</p>
+
+<div class="card"><button id="connect">Connect Wallet</button>
+<div>Address: <code id="addr">ยังไม่เชื่อมต่อ</code></div><div id="net" class="muted"></div></div>
+
+<div class="card"><h3 id="evName">Event</h3><div id="evInfo" class="muted">-</div>
+<button id="buy" disabled>Buy Ticket</button></div>
+
+<div class="card"><h3>My Tickets</h3><div id="mine" class="muted">-</div><button id="refresh" disabled>Refresh</button>
+<div><input id="tid" placeholder="Ticket ID"><input id="to" placeholder="ส่งต่อให้ address (0x...)">
+<button id="transfer" disabled>Transfer</button><button id="verify" disabled>Verify ticket</button></div>
+<div id="vres" class="muted"></div></div>
+
+<div class="card"><h3>Organizer Panel</h3><small>เฉพาะ wallet ผู้จัดงาน</small><div>
+<input id="cid" placeholder="Ticket ID"><button id="checkin" disabled>Check-in</button>
+<button id="withdraw" disabled>Withdraw ETH</button></div></div>
+
+<div class="card" id="tx"><h3>Transaction</h3><div id="txs" class="muted">ยังไม่มี transaction</div></div>
+
+<div class="card"><h3>How this DApp works</h3><ul>
+<li><b>ทำไมใช้ blockchain:</b> ใครก็ตรวจได้ว่าตั๋วมีจริง เป็นของใคร ใช้แล้วหรือยัง กันตั๋วปลอมและใช้ซ้ำโดยไม่ต้องเชื่อใจระบบกลาง</li>
+<li><b>เก็บอะไร on-chain:</b> ticket ID, owner, used, ราคา, จำนวนตั๋ว (ข้อมูลน้อยเพื่อลดค่า gas)</li>
+<li><b>ทำไมออกแบบแบบนี้:</b> ตั๋วซื้อได้เมื่อจ่าย ETH ครบ จำกัด 5 ใบ/wallet, มีแค่ organizer ที่ check-in/ถอนเงินได้, check-in ซ้ำไม่ได้, ใช้ event เก็บประวัติ</li>
+<li><b>ข้อจำกัด:</b> ข้อมูลเป็น public, ต้องมี wallet+ค่า gas, แชร์ wallet = แชร์ตั๋ว, รองรับ event เดียว</li></ul></div>
+
+<script>
+const SEPOLIA="0xaa36a7", ETHERSCAN="https://sepolia.etherscan.io";
+const ABI=[
+"function organizer() view returns (address)","function eventName() view returns (string)","function venue() view returns (string)",
+"function eventDate() view returns (string)","function price() view returns (uint256)","function maxSupply() view returns (uint256)","function sold() view returns (uint256)",
+"function buyTicket() payable returns (uint256)","function checkIn(uint256)","function transferTicket(uint256,address)","function withdraw()",
+"function getTicket(uint256) view returns (address,bool)","function getTicketsOf(address) view returns (uint256[])",
+"event TicketPurchased(uint256 indexed ticketId,address indexed buyer)"];
+const $=id=>document.getElementById(id);
+let provider,signer,c,me,isOrg=false;
+
+function log(html,cls=""){ $("txs").innerHTML=`<div class="${cls}">${html}</div>`; }
+function errMsg(e){
+  if(e.code==="ACTION_REJECTED"||e.code===4001) return "คุณกดปฏิเสธใน MetaMask";
+  return e.reason||e.shortMessage||e.info?.error?.message||e.message;
+}
+async function ensureSepolia(){
+  const id=await window.ethereum.request({method:"eth_chainId"});
+  if(id!==SEPOLIA){
+    try{await window.ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:SEPOLIA}]});}
+    catch(e){throw new Error("กรุณาสลับ MetaMask ไปที่ Sepolia");}
+  }
+}
+async function connect(){
+  try{
+    if(!window.ethereum) return alert("ไม่พบ MetaMask");
+    await ensureSepolia();
+    provider=new ethers.BrowserProvider(window.ethereum);
+    await provider.send("eth_requestAccounts",[]);
+    signer=await provider.getSigner(); me=await signer.getAddress();
+    c=new ethers.Contract(CONTRACT_ADDRESS,ABI,signer);
+    $("addr").textContent=me; $("net").innerHTML='<span class="ok">✓ Sepolia</span>';
+    isOrg=(await c.organizer()).toLowerCase()===me.toLowerCase();
+    ["buy","refresh","transfer","verify"].forEach(i=>$(i).disabled=false);
+    ["checkin","withdraw"].forEach(i=>$(i).disabled=!isOrg);
+    await load();
+  }catch(e){ log(errMsg(e),"err"); }
+}
+async function load(){
+  const [n,v,d,p,m,s]=await Promise.all([c.eventName(),c.venue(),c.eventDate(),c.price(),c.maxSupply(),c.sold()]);
+  $("evName").textContent=n;
+  $("evInfo").innerHTML=`📍 ${v} · 📅 ${d}<br>ราคา ${ethers.formatEther(p)} ETH · ขายแล้ว ${s}/${m}`;
+  const ids=await c.getTicketsOf(me);
+  const rows=[];
+  for(const id of ids){const [,u]=await c.getTicket(id);rows.push(`#${id} ${u?"(ใช้แล้ว)":"(ยังไม่ใช้)"}`);}
+  $("mine").textContent=rows.length?rows.join(" · "):"ยังไม่มีตั๋ว";
+}
+async function send(label,fn,after){
+  try{
+    await ensureSepolia();
+    log(`${label}: รอยืนยันใน MetaMask...`);
+    const tx=await fn();
+    log(`${label}: <b>Pending</b><br>Tx: <a target="_blank" href="${ETHERSCAN}/tx/${tx.hash}">${tx.hash}</a>`);
+    const r=await tx.wait();
+    let extra=after?after(r):"";
+    log(`${label}: <b class="ok">Confirmed ✓</b> (block ${r.blockNumber})${extra}<br>Tx: <a target="_blank" href="${ETHERSCAN}/tx/${tx.hash}">${tx.hash}</a>`);
+    await load();
+  }catch(e){ log(`${label} ล้มเหลว: ${errMsg(e)}`,"err"); }
+}
+$("connect").onclick=connect;
+$("refresh").onclick=()=>load().catch(e=>log(errMsg(e),"err"));
+$("buy").onclick=async()=>send("Buy Ticket",async()=>c.buyTicket({value:await c.price()}),r=>{
+  for(const l of r.logs){try{const p=c.interface.parseLog(l);if(p&&p.name==="TicketPurchased")return `<br>🎟️ Ticket ID: #${p.args.ticketId}`;}catch{}}return "";});
+$("transfer").onclick=()=>send("Transfer",()=>c.transferTicket($("tid").value,$("to").value));
+$("checkin").onclick=()=>send("Check-in",()=>c.checkIn($("cid").value));
+$("withdraw").onclick=()=>send("Withdraw",()=>c.withdraw());
+$("verify").onclick=async()=>{
+  try{const [o,u]=await c.getTicket($("tid").value);$("vres").textContent=`เจ้าของ: ${o} | ${u?"ใช้แล้ว":"ยังไม่ใช้"}`;}
+  catch(e){$("vres").textContent="ไม่พบตั๋วนี้";}};
+if(window.ethereum){window.ethereum.on("chainChanged",()=>location.reload());window.ethereum.on("accountsChanged",()=>location.reload());}
+</script></body></html>
